@@ -330,10 +330,12 @@ function ParticipantList({
   role,
   token,
   roomId,
+  onModeratorRevoked,
 }: {
   role: "organizer" | "moderator" | "listener";
   token: string;
   roomId: string;
+  onModeratorRevoked: () => void;
 }) {
   const [busyIdentity, setBusyIdentity] = useState("");
   const [moderationError, setModerationError] = useState("");
@@ -377,6 +379,14 @@ function ParticipantList({
       const result = await response.json();
 
       if (!response.ok || !result.success) {
+        if (
+          role === "moderator" &&
+          response.status === 403 &&
+          result.error === "Accès à la modération refusé."
+        ) {
+          onModeratorRevoked();
+        }
+
         throw new Error(result.error || "Modération impossible.");
       }
     } catch (err) {
@@ -560,6 +570,62 @@ export default function MeetingClient({
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
 
+  const [moderatorRevoked, setModeratorRevoked] = useState(false);
+
+  useEffect(() => {
+    if (role !== "moderator" || !token) return;
+
+    let stopped = false;
+    let checking = false;
+
+    async function checkModeratorStatus() {
+      if (checking || stopped) return;
+      checking = true;
+
+      try {
+        const response = await fetch(
+          `/api/meetings/moderators/status?roomId=${encodeURIComponent(roomId)}`,
+          {
+            headers: {
+              Authorization: `Bearer ${token}`,
+            },
+            cache: "no-store",
+          }
+        );
+
+        if (!response.ok) return;
+
+        const result: { active?: boolean } = await response.json();
+
+        if (!stopped && result.active === false) {
+          setModeratorRevoked(true);
+          setRole("listener");
+        }
+      } catch {
+        // Une erreur réseau ne signifie pas que le rôle est révoqué.
+      } finally {
+        checking = false;
+      }
+    }
+
+    void checkModeratorStatus();
+
+    const interval = window.setInterval(
+      () => void checkModeratorStatus(),
+      30000
+    );
+
+    const onFocus = () => void checkModeratorStatus();
+
+    window.addEventListener("focus", onFocus);
+
+    return () => {
+      stopped = true;
+      window.clearInterval(interval);
+      window.removeEventListener("focus", onFocus);
+    };
+  }, [role, token, roomId]);
+
   async function joinMeeting(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (loading) return;
@@ -587,6 +653,7 @@ export default function MeetingClient({
         throw new Error(result.error || "Connexion impossible.");
       }
 
+      setModeratorRevoked(false);
       setRole(
         result.role === "organizer" || result.role === "moderator"
           ? result.role
@@ -705,6 +772,16 @@ export default function MeetingClient({
                       : "Vous participez en mode auditeur."}
                 </p>
               </div>
+              {moderatorRevoked && (
+                <p
+                  role="status"
+                  className="rounded-xl bg-amber-50 p-4 text-sm font-medium text-amber-900"
+                >
+                  Vos droits de modération ont été révoqués.
+                  Vous pouvez continuer à participer à cette réunion
+                  en tant qu&apos;auditeur.
+                </p>
+              )}
               {error && (
                 <p role="alert" className="text-red-700">{error}</p>
               )}
@@ -722,7 +799,15 @@ export default function MeetingClient({
                 </>
               )}
               <MeetingVideos />
-              <ParticipantList role={role} token={token} roomId={roomId} />
+              <ParticipantList
+                role={role}
+                token={token}
+                roomId={roomId}
+                onModeratorRevoked={() => {
+                  setModeratorRevoked(true);
+                  setRole("listener");
+                }}
+              />
               <div className="flex justify-center pt-3">
                 <LeaveMeetingButton />
               </div>
