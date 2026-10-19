@@ -162,7 +162,7 @@ export async function POST(request: NextRequest) {
     const token = new AccessToken(key, secret, {
       identity: participantIdentity,
       name: name.trim(),
-      ttl: "15m",
+      ttl: "6h",
       metadata: JSON.stringify({
         sunumeetRole: role,
         ...(verifiedModerator
