@@ -1,0 +1,225 @@
+import { NextRequest, NextResponse } from "next/server";
+import { RoomServiceClient } from "livekit-server-sdk";
+import { TrackSource } from "@livekit/protocol";
+
+import { verifyOrganizer } from "@/lib/meetings/verifyOrganizer";
+import {
+  MAX_SPEAKERS,
+  countAuthorizedSpeakers,
+  buildSpeakerPermission,
+  isAuthorizedSpeaker,
+} from "@/lib/meetings/speakerPermissions";
+
+type ModerationRequest = {
+  roomId?: string;
+  participantIdentity?: string;
+  action?: "allow" | "revoke";
+};
+
+const roomQueues = new Map<string, Promise<void>>();
+
+async function withRoomLock<T>(
+  roomId: string,
+  operation: () => Promise<T>
+): Promise<T> {
+  const previous = roomQueues.get(roomId) ?? Promise.resolve();
+
+  let release!: () => void;
+  const current = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+
+  const tail = previous.then(() => current);
+  roomQueues.set(roomId, tail);
+
+  await previous;
+
+  try {
+    return await operation();
+  } finally {
+    release();
+
+    if (roomQueues.get(roomId) === tail) {
+      roomQueues.delete(roomId);
+    }
+  }
+}
+
+export async function POST(request: NextRequest) {
+  let body: ModerationRequest;
+
+  try {
+    body = await request.json();
+  } catch {
+    return NextResponse.json(
+      { error: "Requête invalide." },
+      { status: 400 }
+    );
+  }
+
+  const { roomId, participantIdentity, action } = body;
+
+  if (
+    typeof roomId !== "string" ||
+    !/^[0-9a-f-]{36}$/i.test(roomId) ||
+    typeof participantIdentity !== "string" ||
+    participantIdentity.length < 1 ||
+    participantIdentity.length > 128 ||
+    (action !== "allow" && action !== "revoke")
+  ) {
+    return NextResponse.json(
+      { error: "Paramètres invalides." },
+      { status: 400 }
+    );
+  }
+
+  const organizer = await verifyOrganizer(
+    request.headers.get("authorization"),
+    roomId
+  );
+
+  if (!organizer) {
+    return NextResponse.json(
+      { error: "Accès organisateur refusé." },
+      { status: 403 }
+    );
+  }
+
+  const url = process.env.LIVEKIT_URL;
+  const key = process.env.LIVEKIT_API_KEY;
+  const secret = process.env.LIVEKIT_API_SECRET;
+
+  if (!url || !key || !secret) {
+    return NextResponse.json(
+      { error: "Configuration serveur indisponible." },
+      { status: 503 }
+    );
+  }
+
+  const roomService = new RoomServiceClient(
+    url.replace(/^wss:/, "https:").replace(/^ws:/, "http:"),
+    key,
+    secret
+  );
+
+  try {
+    return await withRoomLock(roomId, async () => {
+      const participants = await roomService.listParticipants(roomId);
+
+      const connectedOrganizer = participants.find(
+        (participant) => participant.identity === organizer.identity
+      );
+
+      if (
+        !connectedOrganizer ||
+        !connectedOrganizer.permission?.canPublish ||
+        !connectedOrganizer.permission.canPublishSources.includes(
+          TrackSource.MICROPHONE
+        ) ||
+        !connectedOrganizer.permission.canPublishSources.includes(
+          TrackSource.CAMERA
+        )
+      ) {
+        return NextResponse.json(
+          { error: "Organisateur non connecté ou non autorisé." },
+          { status: 403 }
+        );
+      }
+
+      const target = participants.find(
+        (participant) => participant.identity === participantIdentity
+      );
+
+      if (!target || !target.permission) {
+        return NextResponse.json(
+          { error: "Participant introuvable." },
+          { status: 404 }
+        );
+      }
+
+      let targetIsOrganizer = false;
+
+      try {
+        const metadata = JSON.parse(target.metadata || "{}");
+        targetIsOrganizer = metadata.sunumeetRole === "organizer";
+      } catch {
+        return NextResponse.json(
+          { error: "Métadonnées du participant invalides." },
+          { status: 403 }
+        );
+      }
+
+      if (
+        target.identity === organizer.identity ||
+        targetIsOrganizer
+      ) {
+        return NextResponse.json(
+          { error: "Impossible de modifier les permissions d'un organisateur." },
+          { status: 403 }
+        );
+      }
+
+      // Only microphone and camera publishing may be moderated.
+      if (
+        target.permission.canPublishSources.some(
+          (source) =>
+            source !== TrackSource.MICROPHONE &&
+            source !== TrackSource.CAMERA
+        )
+      ) {
+        return NextResponse.json(
+          { error: "Ce participant possède d'autres droits de publication." },
+          { status: 403 }
+        );
+      }
+
+      const alreadyAuthorized = isAuthorizedSpeaker(target.permission);
+
+      if (action === "allow" && !alreadyAuthorized) {
+        const authorizedCount = countAuthorizedSpeakers(
+          participants.map((participant) => participant.permission)
+        );
+
+        if (authorizedCount >= MAX_SPEAKERS) {
+          return NextResponse.json(
+            { error: "La limite de 20 intervenants est atteinte." },
+            { status: 409 }
+          );
+        }
+      }
+
+      if (
+        (action === "allow" && alreadyAuthorized) ||
+        (action === "revoke" && !alreadyAuthorized)
+      ) {
+        return NextResponse.json({
+          success: true,
+          authorized: alreadyAuthorized,
+        });
+      }
+
+      const updated = await roomService.updateParticipant(
+        roomId,
+        participantIdentity,
+        {
+          permission: buildSpeakerPermission(
+            target.permission,
+            action === "allow"
+          ),
+        }
+      );
+
+      return NextResponse.json({
+        success: true,
+        authorized: isAuthorizedSpeaker(updated.permission),
+      });
+    });
+  } catch (error) {
+    console.error("SunuMeet moderation error:", error);
+
+    return NextResponse.json(
+      { error: "La modération a échoué. Réessayez." },
+      { status: 500 }
+    );
+  }
+}
