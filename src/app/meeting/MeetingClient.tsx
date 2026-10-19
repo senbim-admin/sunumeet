@@ -1,8 +1,9 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
 import ShareMeeting from "@/components/ShareMeeting";
+import ModeratorManagement from "@/components/ModeratorManagement";
 import { RoomEvent, Track } from "livekit-client";
 import { TrackSource } from "@livekit/protocol";
 import {
@@ -20,7 +21,7 @@ type JoinResponse = {
   token?: string;
   serverUrl?: string;
   error?: string;
-  role?: "organizer" | "listener";
+  role?: "organizer" | "moderator" | "listener";
 };
 
 function SpeakingIndicator({
@@ -187,7 +188,11 @@ function RaiseHandButton() {
   );
 }
 
-function ListenerMicrophone() {
+function ListenerMicrophone({
+  role,
+}: {
+  role: "moderator" | "listener";
+}) {
   const room = useRoomContext();
   const [microphoneAllowed, setMicrophoneAllowed] = useState(false);
   const [cameraAllowed, setCameraAllowed] = useState(false);
@@ -271,9 +276,9 @@ function ListenerMicrophone() {
       {authorized ? (
         <>
           <p className="mt-2 text-sm text-green-800">
-            L&apos;organisateur vous a autorisé à intervenir.
-            Vous pouvez utiliser votre microphone et votre caméra
-            selon les permissions accordées.
+            {role === "moderator"
+              ? "Vous êtes modérateur et pouvez utiliser votre microphone et votre caméra selon les permissions accordées."
+              : "Vous avez été autorisé à intervenir. Vous pouvez utiliser votre microphone et votre caméra selon les permissions accordées."}
           </p>
 
           <div className="mt-4 grid gap-3 sm:grid-cols-2">
@@ -306,9 +311,9 @@ function ListenerMicrophone() {
         </>
       ) : (
         <p className="mt-2 text-sm text-gray-600">
-          Vous êtes en mode auditeur. Le microphone et la caméra
-          seront disponibles lorsque l&apos;organisateur
-          vous autorisera à intervenir.
+          {role === "moderator"
+            ? "Vous êtes modérateur de cette réunion. Vous pouvez gérer les demandes de parole des participants. Pour intervenir vous-même, votre microphone et votre caméra doivent être autorisés."
+            : "Vous êtes en mode auditeur. Votre microphone et votre caméra seront disponibles lorsqu'un organisateur ou un modérateur vous autorisera à intervenir."}
         </p>
       )}
 
@@ -326,7 +331,7 @@ function ParticipantList({
   token,
   roomId,
 }: {
-  role: "organizer" | "listener";
+  role: "organizer" | "moderator" | "listener";
   token: string;
   roomId: string;
 }) {
@@ -406,7 +411,7 @@ function ParticipantList({
               </div>
             </div>
 
-            {role === "organizer" &&
+            {(role === "organizer" || role === "moderator") &&
               participant.identity !== room.localParticipant.identity &&
               (() => {
                 try {
@@ -523,7 +528,33 @@ export default function MeetingClient({
 }) {
   const [name, setName] = useState("");
   const [organizerCode, setOrganizerCode] = useState("");
-  const [role, setRole] = useState<"organizer" | "listener">("listener");
+  const [moderatorInvite, setModeratorInvite] = useState("");
+  const [invitationReady, setInvitationReady] = useState(false);
+  const moderatorInviteRef = useRef("");
+
+  useEffect(() => {
+    const currentUrl = new URL(window.location.href);
+    const invitation = currentUrl.searchParams.get("moderatorInvite");
+
+    if (invitation) {
+      moderatorInviteRef.current = invitation;
+      currentUrl.searchParams.delete("moderatorInvite");
+
+      window.history.replaceState(
+        window.history.state,
+        "",
+        currentUrl.pathname + currentUrl.search + currentUrl.hash
+      );
+    }
+
+    const frame = window.requestAnimationFrame(() => {
+      setModeratorInvite(moderatorInviteRef.current);
+      setInvitationReady(true);
+    });
+
+    return () => window.cancelAnimationFrame(frame);
+  }, []);
+  const [role, setRole] = useState<"organizer" | "moderator" | "listener">("listener");
   const [token, setToken] = useState("");
   const [serverUrl, setServerUrl] = useState("");
   const [loading, setLoading] = useState(false);
@@ -544,6 +575,9 @@ export default function MeetingClient({
           roomId,
           name: name.trim(),
           ...(organizerCode ? { organizerCode } : {}),
+          ...(moderatorInvite
+            ? { moderatorInvite }
+            : {}),
         }),
       });
 
@@ -553,8 +587,14 @@ export default function MeetingClient({
         throw new Error(result.error || "Connexion impossible.");
       }
 
-      setRole(result.role === "organizer" ? "organizer" : "listener");
+      setRole(
+        result.role === "organizer" || result.role === "moderator"
+          ? result.role
+          : "listener"
+      );
       setOrganizerCode("");
+      moderatorInviteRef.current = "";
+      setModeratorInvite("");
       setServerUrl(result.serverUrl);
       setToken(result.token);
     } catch (err) {
@@ -588,6 +628,7 @@ export default function MeetingClient({
               Entrez votre prénom pour participer sans créer de compte.
             </p>
 
+            {invitationReady && (
             <form onSubmit={joinMeeting} className="mt-7 space-y-4">
               <label htmlFor="participant-name" className="block font-semibold">
                 Votre prénom
@@ -603,18 +644,27 @@ export default function MeetingClient({
                 placeholder="Ex. Abdou"
                 className="w-full rounded-xl border border-[#cbd9d0] px-4 py-3 outline-[#087b52]"
               />
-              <label htmlFor="organizer-code" className="block font-semibold">
-                Code organisateur (facultatif)
-              </label>
-              <input
-                id="organizer-code"
-                type="password"
-                autoComplete="off"
-                value={organizerCode}
-                onChange={(event) => setOrganizerCode(event.target.value)}
-                placeholder="Uniquement pour l'organisateur"
-                className="w-full rounded-xl border border-[#cbd9d0] px-4 py-3 outline-[#087b52]"
-              />
+              {moderatorInvite ? (
+                <div className="rounded-xl bg-green-50 p-4 text-sm text-green-900">
+                  Invitation de modérateur détectée.
+                  Saisissez votre prénom pour rejoindre la réunion.
+                </div>
+              ) : (
+                <>
+                  <label htmlFor="organizer-code" className="block font-semibold">
+                    Code organisateur (facultatif)
+                  </label>
+                  <input
+                    id="organizer-code"
+                    type="password"
+                    autoComplete="off"
+                    value={organizerCode}
+                    onChange={(event) => setOrganizerCode(event.target.value)}
+                    placeholder="Uniquement pour l'organisateur"
+                    className="w-full rounded-xl border border-[#cbd9d0] px-4 py-3 outline-[#087b52]"
+                  />
+                </>
+              )}
               {error && (
                 <p role="alert" className="text-sm text-red-700">
                   {error}
@@ -628,6 +678,7 @@ export default function MeetingClient({
                 {loading ? "Connexion..." : "Rejoindre la réunion"}
               </button>
             </form>
+            )}
           </section>
         ) : (
           <LiveKitRoom
@@ -649,7 +700,9 @@ export default function MeetingClient({
                 <p className="mt-2 text-white/80">
                   {role === "organizer"
                     ? "Vous êtes organisateur de cette réunion."
-                    : "Vous participez en mode auditeur."}
+                    : role === "moderator"
+                      ? "Vous êtes modérateur de cette réunion."
+                      : "Vous participez en mode auditeur."}
                 </p>
               </div>
               {error && (
@@ -659,10 +712,13 @@ export default function MeetingClient({
               <StartAudio label="Activer le son de la réunion" />
               <ShareMeeting roomId={roomId} />
               {role === "organizer" && <OrganizerControls />}
-              {role === "listener" && (
+              {role === "organizer" && (
+                <ModeratorManagement roomId={roomId} token={token} />
+              )}
+              {role !== "organizer" && (
                 <>
-                  <RaiseHandButton />
-                  <ListenerMicrophone />
+                  {role === "listener" && <RaiseHandButton />}
+                  <ListenerMicrophone role={role} />
                 </>
               )}
               <MeetingVideos />

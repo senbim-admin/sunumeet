@@ -2,6 +2,8 @@ import { NextRequest, NextResponse } from "next/server";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { AccessToken, RoomServiceClient } from "livekit-server-sdk";
 import { TrackSource } from "livekit-server-sdk";
+import { verifyModeratorInvite } from "@/lib/meetings/verifyModeratorInvite";
+import { createSupabaseAdmin } from "@/lib/supabase/admin";
 
 export async function POST(request: NextRequest) {
   try {
@@ -34,6 +36,17 @@ export async function POST(request: NextRequest) {
     const roomId = data.roomId;
     const name = data.name;
     const organizerCode = data.organizerCode;
+    const moderatorInvite = data.moderatorInvite;
+
+    if (
+      moderatorInvite !== undefined &&
+      organizerCode !== undefined
+    ) {
+      return NextResponse.json(
+        { error: "Choisissez un seul mode de connexion." },
+        { status: 400 }
+      );
+    }
 
     const configuredCode = process.env.SUNUMEET_ORGANIZER_CODE;
 
@@ -66,6 +79,37 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    let verifiedModerator: Awaited<
+      ReturnType<typeof verifyModeratorInvite>
+    > = null;
+
+    if (moderatorInvite !== undefined) {
+      if (typeof moderatorInvite !== "string") {
+        return NextResponse.json(
+          { error: "Invitation de modérateur invalide." },
+          { status: 403 }
+        );
+      }
+
+      verifiedModerator = await verifyModeratorInvite(
+        roomId,
+        moderatorInvite
+      );
+
+      if (!verifiedModerator) {
+        return NextResponse.json(
+          { error: "Invitation expirée, révoquée ou invalide." },
+          { status: 403 }
+        );
+      }
+    }
+
+    const role = isOrganizer
+      ? "organizer"
+      : verifiedModerator
+        ? "moderator"
+        : "listener";
+
     const url = process.env.LIVEKIT_URL;
     const key = process.env.LIVEKIT_API_KEY;
     const secret = process.env.LIVEKIT_API_SECRET;
@@ -92,12 +136,38 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    const participantIdentity = randomUUID();
+
+    if (isOrganizer) {
+      const { error } = await createSupabaseAdmin()
+        .from("sunumeet_meeting_organizers")
+        .insert({
+          room_id: roomId,
+          participant_identity: participantIdentity,
+        });
+
+      if (error) {
+        console.error(
+          "SunuMeet organizer registration failed:",
+          error.code
+        );
+
+        return NextResponse.json(
+          { error: "Impossible d'enregistrer l'organisateur." },
+          { status: 503 }
+        );
+      }
+    }
+
     const token = new AccessToken(key, secret, {
-      identity: randomUUID(),
+      identity: participantIdentity,
       name: name.trim(),
       ttl: "15m",
       metadata: JSON.stringify({
-        sunumeetRole: isOrganizer ? "organizer" : "listener",
+        sunumeetRole: role,
+        ...(verifiedModerator
+          ? { moderatorInviteId: verifiedModerator.id }
+          : {}),
       }),
     });
 
@@ -116,7 +186,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({
       token: await token.toJwt(),
       serverUrl: url,
-      role: isOrganizer ? "organizer" : "listener",
+      role,
     });
   } catch (error) {
     console.error("SunuMeet join failed:", error);

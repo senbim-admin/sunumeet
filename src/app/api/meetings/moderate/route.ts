@@ -3,6 +3,8 @@ import { RoomServiceClient } from "livekit-server-sdk";
 import { TrackSource } from "@livekit/protocol";
 
 import { verifyOrganizer } from "@/lib/meetings/verifyOrganizer";
+import { verifyModerator } from "@/lib/meetings/verifyModerator";
+import { createSupabaseAdmin } from "@/lib/supabase/admin";
 import {
   MAX_SPEAKERS,
   countAuthorizedSpeakers,
@@ -73,14 +75,22 @@ export async function POST(request: NextRequest) {
     );
   }
 
+  const authorization = request.headers.get("authorization");
+
   const organizer = await verifyOrganizer(
-    request.headers.get("authorization"),
+    authorization,
     roomId
   );
 
-  if (!organizer) {
+  const moderator = organizer
+    ? null
+    : await verifyModerator(authorization, roomId);
+
+  const actor = organizer ?? moderator;
+
+  if (!actor) {
     return NextResponse.json(
-      { error: "Accès organisateur refusé." },
+      { error: "Accès à la modération refusé." },
       { status: 403 }
     );
   }
@@ -106,24 +116,50 @@ export async function POST(request: NextRequest) {
     return await withRoomLock(roomId, async () => {
       const participants = await roomService.listParticipants(roomId);
 
-      const connectedOrganizer = participants.find(
-        (participant) => participant.identity === organizer.identity
+      const connectedActor = participants.find(
+        (participant) => participant.identity === actor.identity
       );
 
+      if (!connectedActor) {
+        return NextResponse.json(
+          { error: "Responsable de modération non connecté." },
+          { status: 403 }
+        );
+      }
+
       if (
-        !connectedOrganizer ||
-        !connectedOrganizer.permission?.canPublish ||
-        !connectedOrganizer.permission.canPublishSources.includes(
-          TrackSource.MICROPHONE
-        ) ||
-        !connectedOrganizer.permission.canPublishSources.includes(
-          TrackSource.CAMERA
+        organizer &&
+        (
+          !connectedActor.permission?.canPublish ||
+          !connectedActor.permission.canPublishSources.includes(
+            TrackSource.MICROPHONE
+          ) ||
+          !connectedActor.permission.canPublishSources.includes(
+            TrackSource.CAMERA
+          )
         )
       ) {
         return NextResponse.json(
-          { error: "Organisateur non connecté ou non autorisé." },
+          { error: "Organisateur non autorisé." },
           { status: 403 }
         );
+      }
+
+      if (moderator) {
+        const activeModerator = await verifyModerator(
+          authorization,
+          roomId
+        );
+
+        if (
+          !activeModerator ||
+          activeModerator.identity !== connectedActor.identity
+        ) {
+          return NextResponse.json(
+            { error: "Droits de modération expirés ou révoqués." },
+            { status: 403 }
+          );
+        }
       }
 
       const target = participants.find(
@@ -149,12 +185,35 @@ export async function POST(request: NextRequest) {
         );
       }
 
+      // Protect organizers using server-controlled identities.
+      // Never rely exclusively on participant metadata.
+      const { data: registeredOrganizer, error: organizerLookupError } =
+        await createSupabaseAdmin()
+          .from("sunumeet_meeting_organizers")
+          .select("participant_identity")
+          .eq("room_id", roomId)
+          .eq("participant_identity", target.identity)
+          .maybeSingle();
+
+      if (organizerLookupError) {
+        console.error(
+          "SunuMeet organizer lookup failed:",
+          organizerLookupError.code
+        );
+
+        return NextResponse.json(
+          { error: "Impossible de vérifier les droits du participant." },
+          { status: 503 }
+        );
+      }
+
       if (
-        target.identity === organizer.identity ||
-        targetIsOrganizer
+        target.identity === actor.identity ||
+        targetIsOrganizer ||
+        registeredOrganizer
       ) {
         return NextResponse.json(
-          { error: "Impossible de modifier les permissions d'un organisateur." },
+          { error: "Impossible de modifier les permissions de ce responsable." },
           { status: 403 }
         );
       }

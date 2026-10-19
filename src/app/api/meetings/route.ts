@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { RoomServiceClient } from "livekit-server-sdk";
+import { createSupabaseAdmin } from "@/lib/supabase/admin";
 
 
 function secureCompare(a: string, b: string): boolean {
@@ -69,6 +70,45 @@ export async function POST(request: NextRequest) {
       departureTimeout: 120,
       maxParticipants: 500,
     });
+
+    // Enregistrer la réunion pour la gestion persistante
+    // des modérateurs et de leurs invitations.
+    let databaseError: unknown = null;
+
+    try {
+      const supabase = createSupabaseAdmin();
+
+      const { error } = await supabase
+        .from("sunumeet_meetings")
+        .insert({ room_id: roomId });
+
+      if (error) {
+        throw new Error(`Supabase insert failed: ${error.code}`);
+      }
+    } catch (error) {
+      databaseError = error;
+    }
+
+    if (databaseError) {
+      console.error(
+        "SunuMeet meeting database registration failed:",
+        databaseError
+      );
+
+      try {
+        await client.deleteRoom(roomId);
+      } catch (cleanupError) {
+        console.error(
+          "SunuMeet LiveKit room cleanup failed:",
+          cleanupError
+        );
+      }
+
+      return NextResponse.json(
+        { error: "Impossible d'enregistrer la réunion." },
+        { status: 503 }
+      );
+    }
 
     const meetingUrl = new URL(
       `/meeting/${roomId}`,
