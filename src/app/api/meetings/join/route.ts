@@ -71,7 +71,8 @@ export async function POST(request: NextRequest) {
       !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(roomId) ||
       typeof name !== "string" ||
       name.trim().length < 2 ||
-      name.trim().length > 60
+      name.trim().length > 60 ||
+      name.trim().split(/\s+/).length < 2
     ) {
       return NextResponse.json(
         { error: "Nom ou réunion invalide." },
@@ -127,13 +128,132 @@ export async function POST(request: NextRequest) {
       secret
     );
 
-    const rooms = await service.listRooms([roomId]);
+    const { data: meeting, error: meetingError } =
+      await createSupabaseAdmin()
+        .from("sunumeet_meetings")
+        .select("room_id, meeting_type, opened_at, ended_at, livekit_cleaned_at")
+        .eq("room_id", roomId)
+        .maybeSingle();
 
-    if (!rooms.some(room => room.name === roomId)) {
+    if (meetingError) {
+      console.error(
+        "SunuMeet meeting access lookup failed:",
+        meetingError.code
+      );
+
       return NextResponse.json(
-        { error: "Réunion introuvable ou expirée." },
+        { error: "Impossible de vérifier l'accès à la réunion." },
+        { status: 503 }
+      );
+    }
+
+    if (!meeting) {
+      return NextResponse.json(
+        { error: "Réunion introuvable." },
         { status: 404 }
       );
+    }
+
+    if (meeting.livekit_cleaned_at) {
+      return NextResponse.json(
+        { error: "Cette réunion est définitivement expirée." },
+        { status: 410 }
+      );
+    }
+
+    if (meeting.ended_at) {
+      const endedAt = Date.parse(meeting.ended_at);
+
+      if (
+        !Number.isFinite(endedAt) ||
+        Date.now() >= endedAt + 60 * 60 * 1000
+      ) {
+        return NextResponse.json(
+          {
+            error:
+              "Le délai d'accès d'une heure après la clôture est expiré.",
+          },
+          { status: 410 }
+        );
+      }
+    }
+
+    const rooms = await service.listRooms([roomId]);
+
+    if (!rooms.some((room) => room.name === roomId)) {
+      if (
+        meeting.meeting_type === "scheduled" &&
+        !meeting.opened_at
+      ) {
+        return NextResponse.json(
+          {
+            error:
+              "La réunion n'a pas encore été ouverte par l'organisateur.",
+          },
+          { status: 404 }
+        );
+      }
+
+      try {
+        await service.createRoom({
+          name: roomId,
+          emptyTimeout: 600,
+          departureTimeout: 120,
+          maxParticipants: 500,
+        });
+      } catch (creationError) {
+        const existingRooms = await service.listRooms([roomId]);
+
+        if (
+          !existingRooms.some((room) => room.name === roomId)
+        ) {
+          console.error(
+            "SunuMeet room restoration failed:",
+            creationError
+          );
+
+          return NextResponse.json(
+            { error: "Impossible de rétablir la réunion." },
+            { status: 503 }
+          );
+        }
+      }
+
+      // Recheck the deadline after the room restoration.
+      const { data: currentMeeting, error: recheckError } =
+        await createSupabaseAdmin()
+          .from("sunumeet_meetings")
+          .select("ended_at, livekit_cleaned_at")
+          .eq("room_id", roomId)
+          .single();
+
+      if (recheckError || !currentMeeting) {
+        return NextResponse.json(
+          { error: "Impossible de confirmer l'accès." },
+          { status: 503 }
+        );
+      }
+
+      if (currentMeeting.livekit_cleaned_at) {
+        return NextResponse.json(
+          { error: "Cette réunion est définitivement expirée." },
+          { status: 410 }
+        );
+      }
+
+      if (
+        currentMeeting.ended_at &&
+        (
+          !Number.isFinite(Date.parse(currentMeeting.ended_at)) ||
+          Date.now() >=
+            Date.parse(currentMeeting.ended_at) + 60 * 60 * 1000
+        )
+      ) {
+        return NextResponse.json(
+          { error: "Le délai d'accès à la réunion est expiré." },
+          { status: 410 }
+        );
+      }
     }
 
     const participantIdentity = randomUUID();
@@ -159,10 +279,32 @@ export async function POST(request: NextRequest) {
       }
     }
 
+    const remainingAccessSeconds = meeting.ended_at
+      ? Math.floor(
+          (
+            Date.parse(meeting.ended_at) +
+            60 * 60 * 1000 -
+            Date.now()
+          ) / 1000
+        )
+      : null;
+
+    if (
+      remainingAccessSeconds !== null &&
+      remainingAccessSeconds <= 0
+    ) {
+      return NextResponse.json(
+        { error: "Le délai d'accès à la réunion est expiré." },
+        { status: 410 }
+      );
+    }
+
     const token = new AccessToken(key, secret, {
       identity: participantIdentity,
       name: name.trim(),
-      ttl: "6h",
+      ttl: remainingAccessSeconds === null
+        ? "5m"
+        : Math.min(300, remainingAccessSeconds),
       metadata: JSON.stringify({
         sunumeetRole: role,
         ...(verifiedModerator

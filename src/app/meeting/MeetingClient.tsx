@@ -116,6 +116,83 @@ function LeaveMeetingButton() {
   );
 }
 
+function EndMeetingButton({
+  roomId,
+  token,
+}: {
+  roomId: string;
+  token: string;
+}) {
+  const room = useRoomContext();
+  const [ending, setEnding] = useState(false);
+  const [error, setError] = useState("");
+
+  async function endMeeting() {
+    if (ending) return;
+
+    const confirmed = window.confirm(
+      "Voulez-vous vraiment terminer cette réunion ? " +
+      "Cette action enregistrera sa clôture officielle."
+    );
+
+    if (!confirmed) return;
+
+    setEnding(true);
+    setError("");
+
+    try {
+      const response = await fetch("/api/meetings/end", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${token}`,
+        },
+        body: JSON.stringify({ roomId }),
+      });
+
+      const result: {
+        success?: boolean;
+        error?: string;
+      } = await response.json();
+
+      if (!response.ok || !result.success) {
+        throw new Error(
+          result.error || "Impossible de terminer la réunion."
+        );
+      }
+
+      await room.disconnect();
+    } catch (err) {
+      setError(
+        err instanceof Error
+          ? err.message
+          : "Impossible de terminer la réunion."
+      );
+    } finally {
+      setEnding(false);
+    }
+  }
+
+  return (
+    <div className="space-y-2">
+      <button
+        type="button"
+        disabled={ending}
+        onClick={() => void endMeeting()}
+        className="rounded-xl border border-red-600 px-5 py-3 font-semibold text-red-700 hover:bg-red-50 disabled:opacity-50"
+      >
+        {ending ? "Clôture en cours..." : "Terminer la réunion"}
+      </button>
+
+      {error && (
+        <p role="alert" className="text-sm text-red-700">
+          {error}
+        </p>
+      )}
+    </div>
+  );
+}
+
 function RaiseHandButton() {
   const room = useRoomContext();
   const [raised, setRaised] = useState(false);
@@ -636,20 +713,49 @@ export default function MeetingClient({
     setError("");
 
     try {
-      const response = await fetch("/api/meetings/join", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          roomId,
-          name: name.trim(),
-          ...(organizerCode ? { organizerCode } : {}),
-          ...(moderatorInvite
-            ? { moderatorInvite }
-            : {}),
-        }),
-      });
+      async function requestJoin() {
+        const response = await fetch("/api/meetings/join", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            roomId,
+            name: name.trim(),
+            ...(organizerCode ? { organizerCode } : {}),
+            ...(moderatorInvite ? { moderatorInvite } : {}),
+          }),
+        });
 
-      const result: JoinResponse = await response.json();
+        const result: JoinResponse = await response.json();
+        return { response, result };
+      }
+
+      let { response, result } = await requestJoin();
+
+      if (response.status === 404) {
+        if (organizerCode && !moderatorInvite) {
+          const openingResponse = await fetch("/api/meetings/open", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ roomId, organizerCode }),
+          });
+
+          if (openingResponse.ok) {
+            ({ response, result } = await requestJoin());
+          } else {
+            const openingResult: { error?: string } =
+              await openingResponse.json();
+
+            throw new Error(
+              openingResult.error || "Impossible d'ouvrir la réunion."
+            );
+          }
+        } else {
+          throw new Error(
+            "Cette réunion n'est pas encore ouverte. " +
+            "Veuillez attendre son ouverture par l'organisateur."
+          );
+        }
+      }
 
       if (!response.ok || !result.token || !result.serverUrl) {
         throw new Error(result.error || "Connexion impossible.");
@@ -694,13 +800,13 @@ export default function MeetingClient({
               Rejoindre la réunion
             </h1>
             <p className="mt-3 text-center text-[#526459]">
-              Entrez votre prénom pour participer sans créer de compte.
+              Saisissez votre prénom et votre nom de famille pour participer sans créer de compte.
             </p>
 
             {invitationReady && (
             <form onSubmit={joinMeeting} className="mt-7 space-y-4">
               <label htmlFor="participant-name" className="block font-semibold">
-                Votre prénom
+                Votre prénom et nom de famille
               </label>
               <input
                 id="participant-name"
@@ -709,14 +815,14 @@ export default function MeetingClient({
                 minLength={2}
                 maxLength={60}
                 required
-                autoComplete="given-name"
-                placeholder="Ex. Abdou"
+                autoComplete="name"
+                placeholder="Prénom et Nom"
                 className="w-full rounded-xl border border-[#cbd9d0] px-4 py-3 outline-[#087b52]"
               />
               {moderatorInvite ? (
                 <div className="rounded-xl bg-green-50 p-4 text-sm text-green-900">
                   Invitation de modérateur détectée.
-                  Saisissez votre prénom pour rejoindre la réunion.
+                  Saisissez votre prénom et votre nom de famille pour rejoindre la réunion.
                 </div>
               ) : (
                 <>
@@ -741,7 +847,7 @@ export default function MeetingClient({
               )}
               <button
                 type="submit"
-                disabled={loading || name.trim().length < 2}
+                disabled={loading || name.trim().split(/\s+/).length < 2}
                 className="w-full rounded-xl bg-[#087b52] px-4 py-4 font-bold text-white disabled:opacity-50"
               >
                 {loading ? "Connexion..." : "Rejoindre la réunion"}
@@ -810,8 +916,11 @@ export default function MeetingClient({
                   setRole("listener");
                 }}
               />
-              <div className="flex justify-center pt-3">
+              <div className="flex flex-wrap items-center justify-center gap-3 pt-3">
                 <LeaveMeetingButton />
+                {role === "organizer" && (
+                  <EndMeetingButton roomId={roomId} token={token} />
+                )}
               </div>
             </div>
           </LiveKitRoom>

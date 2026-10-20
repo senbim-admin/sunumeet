@@ -1,6 +1,7 @@
 import Link from "next/link";
 import CreateMeetingButton from "@/components/CreateMeetingButton";
 import JoinMeetingButton from "@/components/JoinMeetingButton";
+import ScheduleMeetingButton from "@/components/ScheduleMeetingButton";
 
 export default function Home() {
   return (
@@ -32,7 +33,7 @@ export default function Home() {
           votre association ou votre communauté.
         </p>
 
-        <div className="mt-10 grid w-full max-w-xl gap-4 sm:grid-cols-2">
+        <div className="mt-10 grid w-full max-w-5xl gap-4 md:grid-cols-3">
           <div className="rounded-2xl bg-[#087b52] p-5 text-white shadow-lg">
             <div className="mb-3 text-3xl" aria-hidden="true">📹</div>
             <h2 className="text-xl font-bold">Créer une réunion</h2>
@@ -40,6 +41,15 @@ export default function Home() {
               Organisez une rencontre et partagez un lien.
             </p>
             <CreateMeetingButton />
+          </div>
+
+          <div className="rounded-2xl border border-[#dce8e0] bg-white p-5 shadow-sm">
+            <div className="mb-3 text-3xl" aria-hidden="true">📅</div>
+            <h2 className="text-xl font-bold">Programmer une réunion</h2>
+            <p className="mt-2 text-sm text-[#526459]">
+              Choisissez une date, une heure GMT et une durée.
+            </p>
+            <ScheduleMeetingButton />
           </div>
 
           <div className="rounded-2xl border border-[#dce8e0] bg-white p-5 shadow-sm">
