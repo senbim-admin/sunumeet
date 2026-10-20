@@ -221,6 +221,7 @@ function ListenerMicrophone({
 
     sync();
 
+    room.on(RoomEvent.Connected, sync);
     room.on(RoomEvent.ParticipantPermissionsChanged, sync);
     room.on(RoomEvent.LocalTrackPublished, sync);
     room.on(RoomEvent.LocalTrackUnpublished, sync);
@@ -228,6 +229,7 @@ function ListenerMicrophone({
     room.on(RoomEvent.TrackUnmuted, sync);
 
     return () => {
+      room.off(RoomEvent.Connected, sync);
       room.off(RoomEvent.ParticipantPermissionsChanged, sync);
       room.off(RoomEvent.LocalTrackPublished, sync);
       room.off(RoomEvent.LocalTrackUnpublished, sync);

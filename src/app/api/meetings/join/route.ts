@@ -171,14 +171,16 @@ export async function POST(request: NextRequest) {
       }),
     });
 
+    const canSpeakDirectly = isOrganizer || Boolean(verifiedModerator);
+
     token.addGrant({
       roomJoin: true,
       room: roomId,
       canSubscribe: true,
-      canPublish: isOrganizer,
+      canPublish: canSpeakDirectly,
       canPublishData: true,
       canUpdateOwnMetadata: true,
-      canPublishSources: isOrganizer
+      canPublishSources: canSpeakDirectly
         ? [TrackSource.MICROPHONE, TrackSource.CAMERA]
         : [],
     });

@@ -3,6 +3,7 @@ import { RoomServiceClient } from "livekit-server-sdk";
 
 import { verifyOrganizer } from "@/lib/meetings/verifyOrganizer";
 import { createSupabaseAdmin } from "@/lib/supabase/admin";
+import { buildSpeakerPermission } from "@/lib/meetings/speakerPermissions";
 
 const ROOM_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -126,8 +127,60 @@ export async function POST(request: NextRequest) {
       );
     }
 
+    // Supabase is authoritative: the invitation is already revoked.
+    // Revoke existing LiveKit publishing permissions without disconnecting.
+    const affectedParticipants = participants.filter((participant) => {
+      try {
+        const metadata: unknown = JSON.parse(participant.metadata || "{}");
+
+        return (
+          metadata !== null &&
+          typeof metadata === "object" &&
+          "sunumeetRole" in metadata &&
+          metadata.sunumeetRole === "moderator" &&
+          "moderatorInviteId" in metadata &&
+          metadata.moderatorInviteId === inviteId
+        );
+      } catch {
+        return false;
+      }
+    });
+
+    let permissionsUpdated = true;
+
+    for (const participant of affectedParticipants) {
+      if (!participant.permission) {
+        permissionsUpdated = false;
+        continue;
+      }
+
+      try {
+        await roomService.updateParticipant(
+          roomId,
+          participant.identity,
+          {
+            permission: buildSpeakerPermission(
+              participant.permission,
+              false
+            ),
+          }
+        );
+      } catch (error) {
+        permissionsUpdated = false;
+        console.error(
+          "SunuMeet moderator publishing revocation failed:",
+          participant.identity,
+          error
+        );
+      }
+    }
+
     return NextResponse.json(
-      { success: true, inviteId: invitation.id },
+      {
+        success: true,
+        inviteId: invitation.id,
+        permissionsUpdated,
+      },
       { headers: { "Cache-Control": "no-store" } }
     );
   } catch (error) {
