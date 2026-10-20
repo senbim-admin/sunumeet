@@ -1,6 +1,6 @@
 "use client";
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 
 export default function ShareMeeting({
   roomId,
@@ -8,6 +8,16 @@ export default function ShareMeeting({
   roomId: string;
 }) {
   const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (!copied) return;
+
+    const timeout = window.setTimeout(() => {
+      setCopied(false);
+    }, 5000);
+
+    return () => window.clearTimeout(timeout);
+  }, [copied]);
   const [message, setMessage] = useState("");
   const [busy, setBusy] = useState(false);
 

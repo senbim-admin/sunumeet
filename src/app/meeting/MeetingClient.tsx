@@ -46,8 +46,20 @@ function SpeakingIndicator({
 }
 
 function MeetingVideos() {
-  const cameras = useTracks([Track.Source.Camera], {
+  const cameraTracks = useTracks([Track.Source.Camera], {
     onlySubscribed: false,
+  });
+
+  const cameras = cameraTracks.filter((camera) => {
+    if (!("publication" in camera)) return false;
+
+    const publication = camera.publication;
+
+    return Boolean(
+      publication &&
+      publication.track &&
+      !publication.isMuted
+    );
   });
 
   return (

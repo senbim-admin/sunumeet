@@ -27,6 +27,7 @@ type CreateInvitationResponse = {
 
 type ActionResponse = {
   success?: boolean;
+  permissionsUpdated?: boolean;
   error?: string;
 };
 
@@ -51,6 +52,16 @@ export default function ModeratorManagement({ roomId, token }: Props) {
   const [invitations, setInvitations] = useState<Invitation[]>([]);
   const [invitationUrl, setInvitationUrl] = useState("");
   const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (!copied) return;
+
+    const timeout = window.setTimeout(() => {
+      setCopied(false);
+    }, 5000);
+
+    return () => window.clearTimeout(timeout);
+  }, [copied]);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState("");
@@ -232,7 +243,16 @@ export default function ModeratorManagement({ roomId, token }: Props) {
         )
       );
 
-      setMessage("Invitation révoquée.");
+      if (result.permissionsUpdated === true) {
+        setMessage("Invitation révoquée et permissions LiveKit retirées.");
+      } else {
+        setMessage("Invitation révoquée.");
+        setError(
+          "Attention : le retrait des permissions audio et vidéo " +
+          "n'a pas pu être confirmé dans LiveKit. " +
+          "Vérifiez les droits du participant avant de poursuivre."
+        );
+      }
 
       try {
         setInvitations(await loadInvitations());
