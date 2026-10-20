@@ -19,6 +19,7 @@ import {
 
 type JoinResponse = {
   token?: string;
+  adminSession?: string;
   serverUrl?: string;
   error?: string;
   role?: "organizer" | "moderator" | "listener";
@@ -657,14 +658,132 @@ export default function MeetingClient({
   }, []);
   const [role, setRole] = useState<"organizer" | "moderator" | "listener">("listener");
   const [token, setToken] = useState("");
+  const [adminSession, setAdminSession] = useState("");
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    if (!adminSession || !token) return;
+
+    let stopped = false;
+    let refreshing = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const controller = new AbortController();
+
+    function getExpiry(sessionToken: string): number | null {
+      try {
+        const payload = sessionToken.split(".")[0];
+        const normalized = payload
+          .replace(/-/g, "+")
+          .replace(/_/g, "/");
+        const data: unknown = JSON.parse(atob(normalized));
+
+        if (!data || typeof data !== "object") return null;
+
+        const expiresAt = (data as { expiresAt?: unknown }).expiresAt;
+
+        return typeof expiresAt === "number" &&
+          Number.isSafeInteger(expiresAt)
+          ? expiresAt
+          : null;
+      } catch {
+        return null;
+      }
+    }
+
+    const parsedExpiry = getExpiry(adminSession);
+    if (parsedExpiry === null) return;
+    const expiresAt: number = parsedExpiry;
+
+    function schedule(delay: number) {
+      if (stopped) return;
+      if (timer !== undefined) clearTimeout(timer);
+      timer = setTimeout(() => void refresh(), delay);
+    }
+
+    async function refresh() {
+      if (stopped || refreshing) return;
+
+      const remaining = expiresAt * 1000 - Date.now();
+
+      if (remaining > 5 * 60 * 1000) {
+        schedule(remaining - 4 * 60 * 1000);
+        return;
+      }
+
+      if (remaining <= 0) {
+        setError("Session administrative expirée. Reconnexion nécessaire.");
+        return;
+      }
+
+      refreshing = true;
+
+      try {
+        const response = await fetch(
+          "/api/meetings/admin-session/refresh",
+          {
+            method: "POST",
+            headers: {
+              Authorization: `Bearer ${adminSession}`,
+            },
+            cache: "no-store",
+            signal: controller.signal,
+          }
+        );
+
+        const result: {
+          success?: boolean;
+          adminSession?: string;
+          error?: string;
+        } = await response.json();
+
+        if (stopped) return;
+
+        if (response.ok && result.success && result.adminSession) {
+          setAdminSession(result.adminSession);
+          return;
+        }
+
+        if (response.status === 401 || response.status === 403) {
+          setError(result.error || "Autorisations administratives expirées.");
+          return;
+        }
+
+        setError(result.error || "Renouvellement temporairement indisponible.");
+        schedule(15 * 1000);
+      } catch {
+        if (!stopped) {
+          setError("Connexion instable : nouvel essai de renouvellement.");
+          schedule(15 * 1000);
+        }
+      } finally {
+        refreshing = false;
+      }
+    }
+
+    const onResume = () => {
+      if (!document.hidden) void refresh();
+    };
+
+    window.addEventListener("focus", onResume);
+    document.addEventListener("visibilitychange", onResume);
+
+    schedule(Math.max(0, expiresAt * 1000 - Date.now() - 4 * 60 * 1000));
+
+    return () => {
+      stopped = true;
+      controller.abort();
+      if (timer !== undefined) clearTimeout(timer);
+      window.removeEventListener("focus", onResume);
+      document.removeEventListener("visibilitychange", onResume);
+    };
+  }, [adminSession, token]);
   const [serverUrl, setServerUrl] = useState("");
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState("");
 
   const [moderatorRevoked, setModeratorRevoked] = useState(false);
 
   useEffect(() => {
-    if (role !== "moderator" || !token) return;
+    if (role !== "moderator" || !adminSession || !token) return;
 
     let stopped = false;
     let checking = false;
@@ -678,7 +797,7 @@ export default function MeetingClient({
           `/api/meetings/moderators/status?roomId=${encodeURIComponent(roomId)}`,
           {
             headers: {
-              Authorization: `Bearer ${token}`,
+              Authorization: `Bearer ${adminSession}`,
             },
             cache: "no-store",
           }
@@ -690,6 +809,7 @@ export default function MeetingClient({
 
         if (!stopped && result.active === false) {
           setModeratorRevoked(true);
+          setAdminSession("");
           setRole("listener");
         }
       } catch {
@@ -715,7 +835,7 @@ export default function MeetingClient({
       window.clearInterval(interval);
       window.removeEventListener("focus", onFocus);
     };
-  }, [role, token, roomId]);
+  }, [role, token, adminSession, roomId]);
 
   async function joinMeeting(event: React.FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -784,6 +904,7 @@ export default function MeetingClient({
       setModeratorInvite("");
       setServerUrl(result.serverUrl);
       setToken(result.token);
+      setAdminSession(result.adminSession ?? "");
     } catch (err) {
       setError(
         err instanceof Error ? err.message : "Une erreur est survenue."
@@ -876,6 +997,7 @@ export default function MeetingClient({
             video={false}
             onDisconnected={() => {
               setToken("");
+              setAdminSession("");
               setServerUrl("");
               setRole("listener");
             }}
@@ -910,7 +1032,10 @@ export default function MeetingClient({
               <ShareMeeting roomId={roomId} />
               {role === "organizer" && <OrganizerControls />}
               {role === "organizer" && (
-                <ModeratorManagement roomId={roomId} token={token} />
+                <ModeratorManagement
+                  roomId={roomId}
+                  token={adminSession || token}
+                />
               )}
               {role !== "organizer" && (
                 <>
@@ -921,17 +1046,21 @@ export default function MeetingClient({
               <MeetingVideos />
               <ParticipantList
                 role={role}
-                token={token}
+                token={adminSession || token}
                 roomId={roomId}
                 onModeratorRevoked={() => {
                   setModeratorRevoked(true);
+                  setAdminSession("");
                   setRole("listener");
                 }}
               />
               <div className="flex flex-wrap items-center justify-center gap-3 pt-3">
                 <LeaveMeetingButton />
                 {role === "organizer" && (
-                  <EndMeetingButton roomId={roomId} token={token} />
+                  <EndMeetingButton
+                    roomId={roomId}
+                    token={adminSession || token}
+                  />
                 )}
               </div>
             </div>

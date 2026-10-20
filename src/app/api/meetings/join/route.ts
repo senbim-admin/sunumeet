@@ -4,6 +4,7 @@ import { AccessToken, RoomServiceClient } from "livekit-server-sdk";
 import { TrackSource } from "livekit-server-sdk";
 import { verifyModeratorInvite } from "@/lib/meetings/verifyModeratorInvite";
 import { createSupabaseAdmin } from "@/lib/supabase/admin";
+import { createAdminSession } from "@/lib/meetings/adminSession";
 
 export async function POST(request: NextRequest) {
   try {
@@ -327,10 +328,23 @@ export async function POST(request: NextRequest) {
         : [],
     });
 
+    const adminSession =
+      role === "organizer" || role === "moderator"
+        ? createAdminSession({
+            roomId,
+            identity: participantIdentity,
+            role,
+            ...(verifiedModerator
+              ? { inviteId: verifiedModerator.id }
+              : {}),
+          })
+        : null;
+
     return NextResponse.json({
       token: await token.toJwt(),
       serverUrl: url,
       role,
+      ...(adminSession ? { adminSession } : {}),
     });
   } catch (error) {
     console.error("SunuMeet join failed:", error);

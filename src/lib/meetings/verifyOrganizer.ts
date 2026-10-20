@@ -1,4 +1,6 @@
 import { TokenVerifier } from "livekit-server-sdk";
+import { verifyAdminSession } from "@/lib/meetings/adminSession";
+import { createSupabaseAdmin } from "@/lib/supabase/admin";
 
 type OrganizerIdentity = {
   roomId: string;
@@ -20,6 +22,30 @@ export async function verifyOrganizer(
 
   if (!jwt || jwt.length > 8192) {
     return null;
+  }
+
+  const adminSession = verifyAdminSession(jwt);
+
+  if (
+    adminSession &&
+    adminSession.roomId === roomId &&
+    adminSession.role === "organizer"
+  ) {
+    const { data, error } = await createSupabaseAdmin()
+      .from("sunumeet_meeting_organizers")
+      .select("participant_identity")
+      .eq("room_id", roomId)
+      .eq("participant_identity", adminSession.identity)
+      .maybeSingle();
+
+    if (error || !data) {
+      return null;
+    }
+
+    return {
+      roomId,
+      identity: adminSession.identity,
+    };
   }
 
   try {
