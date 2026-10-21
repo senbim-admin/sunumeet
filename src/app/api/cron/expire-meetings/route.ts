@@ -80,20 +80,6 @@ export async function GET(request: NextRequest) {
 
   for (const meeting of meetings ?? []) {
     try {
-      const { error: updateError } = await supabase
-        .from("sunumeet_meetings")
-        .update({
-          livekit_cleaned_at: new Date().toISOString(),
-        })
-        .eq("room_id", meeting.room_id)
-        .is("livekit_cleaned_at", null);
-
-      if (updateError) {
-        throw new Error(
-          `Cleanup status update failed: ${updateError.code}`
-        );
-      }
-
       const rooms = await roomService.listRooms([
         meeting.room_id,
       ]);
@@ -107,6 +93,20 @@ export async function GET(request: NextRequest) {
         closed++;
       } else {
         alreadyAbsent++;
+      }
+
+      const { error: updateError } = await supabase
+        .from("sunumeet_meetings")
+        .update({
+          livekit_cleaned_at: new Date().toISOString(),
+        })
+        .eq("room_id", meeting.room_id)
+        .is("livekit_cleaned_at", null);
+
+      if (updateError) {
+        throw new Error(
+          `Cleanup status update failed: ${updateError.code}`
+        );
       }
     } catch (roomError) {
       failed++;

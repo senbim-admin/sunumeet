@@ -6,6 +6,33 @@ import { createSupabaseAdmin } from "@/lib/supabase/admin";
 const ROOM_ID_PATTERN =
   /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
+async function closeLiveKitRoom(
+  roomService: RoomServiceClient,
+  roomId: string
+): Promise<void> {
+  const rooms = await roomService.listRooms([roomId]);
+
+  if (!rooms.some((room) => room.name === roomId)) {
+    return;
+  }
+
+  try {
+    await roomService.deleteRoom(roomId);
+  } catch (cleanupError) {
+    try {
+      const remainingRooms = await roomService.listRooms([roomId]);
+
+      if (!remainingRooms.some((room) => room.name === roomId)) {
+        return;
+      }
+    } catch {
+      // Impossible de confirmer la suppression : conserver l'erreur.
+    }
+
+    throw cleanupError;
+  }
+}
+
 export async function POST(request: NextRequest) {
   try {
     if (Number(request.headers.get("content-length") || 0) > 4096) {
@@ -107,6 +134,40 @@ export async function POST(request: NextRequest) {
     }
 
     if (meeting.ended_at) {
+      try {
+        await closeLiveKitRoom(roomService, roomId);
+      } catch (cleanupError) {
+        console.error(
+          "SunuMeet retry room cleanup failed:",
+          cleanupError
+        );
+
+        return NextResponse.json(
+          {
+            error:
+              "Réunion déjà clôturée, mais la déconnexion générale " +
+              "n'a pas pu être confirmée.",
+            endedAt: meeting.ended_at,
+          },
+          { status: 503 }
+        );
+      }
+
+      const { error: cleanupStatusError } = await supabase
+        .from("sunumeet_meetings")
+        .update({
+          livekit_cleaned_at: new Date().toISOString(),
+        })
+        .eq("room_id", roomId)
+        .is("livekit_cleaned_at", null);
+
+      if (cleanupStatusError) {
+        console.error(
+          "SunuMeet retry cleanup status update failed:",
+          cleanupStatusError.code
+        );
+      }
+
       return NextResponse.json({
         success: true,
         alreadyEnded: true,
@@ -150,11 +211,79 @@ export async function POST(request: NextRequest) {
         );
       }
 
+      try {
+        await closeLiveKitRoom(roomService, roomId);
+      } catch (cleanupError) {
+        console.error(
+          "SunuMeet concurrent room cleanup failed:",
+          cleanupError
+        );
+
+        return NextResponse.json(
+          {
+            error:
+              "Réunion clôturée, mais la déconnexion générale " +
+              "n'a pas pu être confirmée.",
+            endedAt: current.ended_at,
+          },
+          { status: 503 }
+        );
+      }
+
+      const { error: cleanupStatusError } = await supabase
+        .from("sunumeet_meetings")
+        .update({
+          livekit_cleaned_at: new Date().toISOString(),
+        })
+        .eq("room_id", roomId)
+        .is("livekit_cleaned_at", null);
+
+      if (cleanupStatusError) {
+        console.error(
+          "SunuMeet concurrent cleanup status update failed:",
+          cleanupStatusError.code
+        );
+      }
+
       return NextResponse.json({
         success: true,
         alreadyEnded: true,
         endedAt: current.ended_at,
       });
+    }
+
+    try {
+      await closeLiveKitRoom(roomService, roomId);
+    } catch (cleanupError) {
+      console.error(
+        "SunuMeet immediate room cleanup failed:",
+        cleanupError
+      );
+
+      return NextResponse.json(
+        {
+          error:
+            "Réunion clôturée, mais la déconnexion générale a échoué. " +
+            "Le nettoyage automatique prendra le relais.",
+          endedAt: updated.ended_at,
+        },
+        { status: 503 }
+      );
+    }
+
+    const { error: cleanupStatusError } = await supabase
+      .from("sunumeet_meetings")
+      .update({
+        livekit_cleaned_at: new Date().toISOString(),
+      })
+      .eq("room_id", roomId)
+      .is("livekit_cleaned_at", null);
+
+    if (cleanupStatusError) {
+      console.error(
+        "SunuMeet cleanup status update failed:",
+        cleanupStatusError.code
+      );
     }
 
     return NextResponse.json({
