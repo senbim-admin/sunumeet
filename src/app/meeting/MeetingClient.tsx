@@ -659,6 +659,8 @@ export default function MeetingClient({
   const [role, setRole] = useState<"organizer" | "moderator" | "listener">("listener");
   const [token, setToken] = useState("");
   const [adminSession, setAdminSession] = useState("");
+  const [meetingEnded, setMeetingEnded] = useState(false);
+  const [checkingMeetingStatus, setCheckingMeetingStatus] = useState(true);
   const [error, setError] = useState("");
 
   useEffect(() => {
@@ -782,6 +784,60 @@ export default function MeetingClient({
 
   const [moderatorRevoked, setModeratorRevoked] = useState(false);
 
+  async function checkMeetingEnded(): Promise<void> {
+    try {
+      const response = await fetch(
+        `/api/meetings/status?roomId=${encodeURIComponent(roomId)}`,
+        { cache: "no-store" }
+      );
+
+      if (!response.ok) return;
+
+      const result: { meetingEnded?: boolean } =
+        await response.json();
+
+      if (result.meetingEnded === true) {
+        setMeetingEnded(true);
+      }
+    } catch {
+      // Une erreur réseau ne confirme pas la fin de la réunion.
+    }
+  }
+
+  useEffect(() => {
+    let active = true;
+
+    async function checkInitialStatus() {
+      try {
+        const response = await fetch(
+          `/api/meetings/status?roomId=${encodeURIComponent(roomId)}`,
+          { cache: "no-store" }
+        );
+
+        if (response.ok) {
+          const result: { meetingEnded?: boolean } =
+            await response.json();
+
+          if (active && result.meetingEnded === true) {
+            setMeetingEnded(true);
+          }
+        }
+      } catch {
+        // Conserver le fonctionnement normal en cas d'erreur réseau.
+      } finally {
+        if (active) setCheckingMeetingStatus(false);
+      }
+    }
+
+    void checkInitialStatus();
+
+    return () => {
+      active = false;
+    };
+  }, [roomId]);
+
+
+
   useEffect(() => {
     if (role !== "moderator" || !adminSession || !token) return;
 
@@ -889,6 +945,11 @@ export default function MeetingClient({
         }
       }
 
+      if (response.status === 410) {
+        setMeetingEnded(true);
+        return;
+      }
+
       if (!response.ok || !result.token || !result.serverUrl) {
         throw new Error(result.error || "Connexion impossible.");
       }
@@ -926,7 +987,19 @@ export default function MeetingClient({
       </header>
 
       <div className="mx-auto max-w-3xl px-5 py-12">
-        {!token ? (
+        {checkingMeetingStatus ? (
+          <section role="status" className="text-center text-[#526459]">
+            Vérification de la réunion...
+          </section>
+        ) : meetingEnded ? (
+          <section role="status" className="mx-auto max-w-md rounded-2xl bg-white p-7 text-center shadow-sm">
+            <div className="mb-4 text-4xl">✅</div>
+            <h1 className="text-2xl font-bold">Cette réunion est terminée.</h1>
+            <p className="mt-3 text-[#526459]">
+              L&apos;organisateur a clôturé la réunion. Merci pour votre participation.
+            </p>
+          </section>
+        ) : !token ? (
           <section className="mx-auto max-w-md rounded-2xl bg-white p-7 shadow-sm">
             <div className="mb-4 text-center text-4xl">👋</div>
             <h1 className="text-center text-2xl font-bold">
@@ -1000,6 +1073,7 @@ export default function MeetingClient({
               setAdminSession("");
               setServerUrl("");
               setRole("listener");
+              void checkMeetingEnded();
             }}
             onError={(err) => setError(err.message)}
           >

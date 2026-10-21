@@ -157,26 +157,28 @@ export async function POST(request: NextRequest) {
 
     if (meeting.livekit_cleaned_at) {
       return NextResponse.json(
-        { error: "Cette réunion est définitivement expirée." },
+        {
+          error:
+            "Cette réunion est terminée. " +
+            "L'organisateur a clôturé la réunion. " +
+            "Merci pour votre participation.",
+          meetingEnded: true,
+        },
         { status: 410 }
       );
     }
 
     if (meeting.ended_at) {
-      const endedAt = Date.parse(meeting.ended_at);
-
-      if (
-        !Number.isFinite(endedAt) ||
-        Date.now() >= endedAt + 60 * 60 * 1000
-      ) {
-        return NextResponse.json(
-          {
-            error:
-              "Le délai d'accès d'une heure après la clôture est expiré.",
-          },
-          { status: 410 }
-        );
-      }
+      return NextResponse.json(
+        {
+          error:
+            "Cette réunion est terminée. " +
+            "L'organisateur a clôturé la réunion. " +
+            "Merci pour votre participation.",
+          meetingEnded: true,
+        },
+        { status: 410 }
+      );
     }
 
     const rooms = await service.listRooms([roomId]);
@@ -242,16 +244,15 @@ export async function POST(request: NextRequest) {
         );
       }
 
-      if (
-        currentMeeting.ended_at &&
-        (
-          !Number.isFinite(Date.parse(currentMeeting.ended_at)) ||
-          Date.now() >=
-            Date.parse(currentMeeting.ended_at) + 60 * 60 * 1000
-        )
-      ) {
+      if (currentMeeting.ended_at) {
         return NextResponse.json(
-          { error: "Le délai d'accès à la réunion est expiré." },
+          {
+            error:
+              "Cette réunion est terminée. " +
+              "L'organisateur a clôturé la réunion. " +
+              "Merci pour votre participation.",
+            meetingEnded: true,
+          },
           { status: 410 }
         );
       }
@@ -280,32 +281,10 @@ export async function POST(request: NextRequest) {
       }
     }
 
-    const remainingAccessSeconds = meeting.ended_at
-      ? Math.floor(
-          (
-            Date.parse(meeting.ended_at) +
-            60 * 60 * 1000 -
-            Date.now()
-          ) / 1000
-        )
-      : null;
-
-    if (
-      remainingAccessSeconds !== null &&
-      remainingAccessSeconds <= 0
-    ) {
-      return NextResponse.json(
-        { error: "Le délai d'accès à la réunion est expiré." },
-        { status: 410 }
-      );
-    }
-
     const token = new AccessToken(key, secret, {
       identity: participantIdentity,
       name: name.trim(),
-      ttl: remainingAccessSeconds === null
-        ? "5m"
-        : Math.min(300, remainingAccessSeconds),
+      ttl: "5m",
       metadata: JSON.stringify({
         sunumeetRole: role,
         ...(verifiedModerator
